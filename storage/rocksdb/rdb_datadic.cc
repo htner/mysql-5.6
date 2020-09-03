@@ -1222,14 +1222,21 @@ uchar *Rdb_key_def::pack_field(Field *const field, Rdb_field_packing *pack_info,
   Get index columns from the record and pack them into mem-comparable form.
 
   @param
+    我们正在工作的表
     tbl                   Table we're working on
+    记录的缓存区，以table->record的格式保存字段
     record           IN   Record buffer with fields in table->record format
+    给编码非定长字符串的临时的内存区。它的大小至少是max_storage_fmt_length()个字节
     pack_buffer      IN   Temporary area for packing varchars. The size is
                           at least max_storage_fmt_length() bytes.
+    用mem-comparabl格式编码的索引
     packed_tuple     OUT  Key in the mem-comparable form
+
     unpack_info      OUT  Unpack data
     unpack_info_len  OUT  Unpack data length
+    需要处理的key parts的数量
     n_key_parts           Number of keyparts to process. 0 means all of them.
+    空列的数量
     n_null_fields    OUT  Number of key fields with NULL value.
     ttl_bytes        IN   Previous ttl bytes from old record for update case or
                           current ttl bytes from just packed primary key/value
@@ -1264,15 +1271,22 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
   size_t covered_bitmap_pos = size_t(-1);
   const bool hidden_pk_exists = table_has_hidden_pk(tbl);
 
+  // net order, 大端序
   rdb_netbuf_store_index(tuple, m_index_number);
   tuple += INDEX_NUMBER_SIZE;
 
+  // 如果n_key_parts等于0，意味着需要所有的列
+  // 接下来包含'扩展key'的后部
+  // extended key'包含primary key. 
+  // 这样做可以对non-unique索引保持唯一性
   // If n_key_parts is 0, it means all columns.
   // The following includes the 'extended key' tail.
   // The 'extended key' includes primary key. This is done to 'uniqify'
   // non-unique indexes
   const bool use_all_columns = n_key_parts == 0 || n_key_parts == MAX_REF_PARTS;
 
+  // 如果有隐藏的pk存在，但是隐藏的pk没有传过来，我们不能打包隐藏的部分key. 所以我
+  // 只能跳过它（它只有一个部分）
   // If hidden pk exists, but hidden pk wasnt passed in, we can't pack the
   // hidden key part.  So we skip it (its always 1 part).
   if (hidden_pk_exists && !hidden_pk_id && use_all_columns) {
@@ -1283,6 +1297,7 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
 
   if (n_null_fields) *n_null_fields = 0;
 
+  // 检查我们是否需要覆盖位图. 如果确定所有的key需要覆盖，我们不需要它
   // Check if we need a covered bitmap. If it is certain that all key parts are
   // covering, we don't need one.
   bool store_covered_bitmap = false;
@@ -1337,6 +1352,7 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
   for (uint i = 0; i < n_key_parts; i++) {
     // Fill hidden pk id into the last key part for secondary keys for tables
     // with no pk
+    // 为没有pk的表的辅助索引，填充隐藏的pk id 到最后的key part位置
     if (hidden_pk_exists && hidden_pk_id && i + 1 == n_key_parts) {
       m_pack_info[i].fill_hidden_pk_val(&tuple, hidden_pk_id);
       break;
@@ -1345,8 +1361,8 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
     Field *const field = m_pack_info[i].get_field_in_table(tbl);
     DBUG_ASSERT(field != nullptr);
 
-    uint field_offset = field->ptr - tbl->record[0];
-    uint null_offset = field->null_offset(tbl->record[0]);
+    uint field_offset = field->ptr - tbl->record[0]; // 偏移量
+    uint null_offset = field->null_offset(tbl->record[0]); // 是否为空
     bool maybe_null = field->real_maybe_null();
 
     field->move_field(
@@ -1354,7 +1370,7 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
         maybe_null ? const_cast<uchar *>(record) + null_offset : nullptr,
         field->null_bit);
     // WARNING! Don't return without restoring field->ptr and field->null_ptr
-
+    // 打包
     tuple = pack_field(field, &m_pack_info[i], tuple, packed_tuple, pack_buffer,
                        unpack_info, n_null_fields);
 
@@ -1387,8 +1403,11 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
     const size_t len = unpack_info->get_current_pos() - unpack_start_pos;
     DBUG_ASSERT(len <= std::numeric_limits<uint16_t>::max());
 
+    // 如果只有头，不要保存unpack_info（它是说，没有有意义的内容）
     // Don't store the unpack_info if it has only the header (that is, there's
     // no meaningful content).
+    // 主键是特殊的：对于他们，保存unpack_info即使它是空的(如果m_maybe_unpack_info==true,
+    // 查看ha_rocksdb::convert_record_to_storage_format)
     // Primary Keys are special: for them, store the unpack_info even if it's
     // empty (provided m_maybe_unpack_info==true, see
     // ha_rocksdb::convert_record_to_storage_format)
@@ -1408,6 +1427,8 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
     // so the checksums are computed and stored by
     // ha_rocksdb::convert_record_to_storage_format
     //
+    // 在值的部分，辅助索引有key跟value的checksums。主索引是一个特殊的情况（它的值部分没有indexed的列）
+    // 所以checksums通过ha_rocksdb::convert_record_to_storage_format计算跟保存
     if (should_store_row_debug_checksums) {
       const uint32_t key_crc32 = crc32(0, packed_tuple, tuple - packed_tuple);
       const uint32_t val_crc32 =

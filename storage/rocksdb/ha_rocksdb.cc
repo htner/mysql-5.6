@@ -2541,6 +2541,7 @@ class Rdb_snapshot_notifier : public rocksdb::TransactionNotifier {
 };
 
 /* This is the base class for transactions when interacting with rocksdb.
+   这是一个相互作用于rocksdb事务的基础类
  */
 class Rdb_transaction {
  protected:
@@ -8929,7 +8930,9 @@ rocksdb::Status ha_rocksdb::get_for_update(
     const rocksdb::Slice &key, rocksdb::PinnableSlice *const value) const {
   DBUG_ASSERT(m_lock_rows != RDB_LOCK_NONE);
 
+  // 是否是独占的
   bool exclusive = m_lock_rows != RDB_LOCK_READ;
+  // 确认的
   bool do_validate = my_core::thd_tx_isolation(ha_thd()) > ISO_READ_COMMITTED;
   rocksdb::Status s =
       tx->get_for_update(key_descr, key, value, exclusive, do_validate);
@@ -9604,8 +9607,17 @@ void ha_rocksdb::dec_table_n_rows() {
 }
 
 /**
+  为before_update|delete映像（MysQL行格式） 的构造 m_last_rowkey(MyRocks key格式)
   Constructing m_last_rowkey (MyRocks key expression) from
-  before_update|delete image (MySQL row expression).
+  before_update|delete image (MySQL row expression).】、
+
+  m_last_rowkey在查找阶段就会设置， 比如rnd_next_with_direction() and rnd_pos().
+  对于Read Free Replication， 这些读的函数会跳过；update_rows(), delete_rows()调用不会设置
+  m_last_rowkey。 在Read Free Replication, 这个方法设置m_last_rowkey
+
+  《MyRocks有一个名为“无读复制”的功能，可以显著提高复制性能。这一特点的灵感来自TokuDB。
+  此外，还有一个名为“跳过唯一性检查”的功能》
+
   m_last_rowkey is normally set during lookup phase, such as
   rnd_next_with_direction() and rnd_pos(). With Read Free Replication,
   these read functions are skipped and update_rows(), delete_rows() are
@@ -9669,6 +9681,7 @@ int ha_rocksdb::get_pk_for_update(struct update_row_info *const row_info) {
 }
 
 /**
+   检查特定的primary key的值是否唯一，并锁住该行
    Check the specified primary key value is unique and also lock the row
 
   @param[in] key_id           key index
@@ -9687,19 +9700,26 @@ int ha_rocksdb::check_and_lock_unique_pk(const uint key_id,
 
   DBUG_ASSERT(row_info.old_pk_slice.size() == 0 ||
               row_info.new_pk_slice.compare(row_info.old_pk_slice) != 0);
-
-  /* Ignore PK violations if this is a optimized 'replace into' */
+  
+  /* Ignore PK violations if this is a optimized 'replace into' 
+     如果是优化'replace into', 忽略PK违反唯一性检查
+  */
   const bool ignore_pk_unique_check = ha_thd()->lex->blind_replace_into;
 
   /*
+    执行读检查是否存在duplicate的数据项
+    对于主键，点查找就足够了
     Perform a read to determine if a duplicate entry exists. For primary
     keys, a point lookup will be sufficient.
 
+    注意：我们打算不在这里设置 options.snapshot。我们读最新的提交的数据
     note: we intentionally don't set options.snapshot here. We want to read
     the latest committed data.
   */
 
   /*
+    为了保护像以下一样的条件竞争，我们需要为目标行申请一个锁。
+    get_for_update() 如果不存在，会持有一个间隙锁，所以以下的条件不能发生
     To prevent race conditions like below, it is necessary to
     take a lock for a target row. get_for_update() holds a gap lock if
     target key does not exist, so below conditions should never
@@ -9709,7 +9729,9 @@ int ha_rocksdb::check_and_lock_unique_pk(const uint key_id,
        -> T2 Put(overwrite) -> T2 commit
     2) T1 Get(empty) -> T1 Put(insert, not committed yet) -> T2 Get(empty)
        -> T2 Put(insert, blocked) -> T1 commit -> T2 commit(overwrite)
+    注：这是典型的写冲突
   */
+  // 获取最新的数据
   const rocksdb::Status s =
       get_for_update(row_info.tx, *m_pk_descr, row_info.new_pk_slice,
                      ignore_pk_unique_check ? nullptr : &m_retrieved_record);
@@ -9721,7 +9743,7 @@ int ha_rocksdb::check_and_lock_unique_pk(const uint key_id,
   bool key_found = ignore_pk_unique_check ? false : !s.IsNotFound();
 
   /*
-    If the pk key has ttl, we may need to pretend the row wasn't
+    If the pk key has ttl, we may need to prestend the row wasn't
     found if it is already expired.
   */
   if (key_found && m_pk_descr->has_ttl() &&
@@ -9911,10 +9933,13 @@ int ha_rocksdb::check_and_lock_sk(const uint key_id,
 }
 
 /**
+   枚举所有的keys检测它们是否是唯一的并上锁
    Enumerate all keys to check their uniquess and also lock it
 
+  拥有所有更新行的数据，例如旧行数据与新行数据
   @param[in] row_info         hold all data for update row, such as old row
                               data and new row data
+  主键是否更新
   @param[out] pk_changed      whether primary key is changed
   @return
     HA_EXIT_SUCCESS  OK
@@ -9923,6 +9948,9 @@ int ha_rocksdb::check_and_lock_sk(const uint key_id,
 int ha_rocksdb::check_uniqueness_and_lock(
     const struct update_row_info &row_info, bool pk_changed) {
   /*
+    彻查每一个index，决定index是否有唯一性的要求
+    如果是，尝试获取一个新值的行锁
+    如果所有的锁获取成功，接下来就执行update/insert该行的更改
     Go through each index and determine if the index has uniqueness
     requirements. If it does, then try to obtain a row lock on the new values.
     Once all locks have been obtained, then perform the changes needed to
@@ -10119,7 +10147,7 @@ int ha_rocksdb::update_write_pk(const Rdb_key_def &kd,
       return row_info.tx->set_status_error(table->in_use, s, kd, m_tbl_def,
                                            m_table_handler);
     } else {
-      bytes_written = row_info.old_pk_slice.size();
+      bytes_written = row_info.old_pk,_slice.size();
     }
   }
 
@@ -10392,6 +10420,8 @@ int ha_rocksdb::update_write_row(const uchar *const old_data,
   DEBUG_SYNC(ha_thd(), "rocksdb.update_write_row_after_unique_check");
 
   /*
+    这里，所有的锁已经获得，所有的duplicate key已经检查完成。 没有错误允许从这里发生，
+    因为更新事务会生成，这些更新不容易在整个事务中移除回滚
     At this point, all locks have been obtained, and all checks for duplicate
     keys have been performed. No further errors can be allowed to occur from
     here because updates to the transaction will be made and those updates

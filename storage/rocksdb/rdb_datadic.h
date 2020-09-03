@@ -204,13 +204,16 @@ enum {
 };
 
 /*
+  这个对象的实例等于某个SQL表的一个索引项的信息。它提供编码与解码索引元组的服务。
   An object of this class represents information about an index in an SQL
   table. It provides services to encode and decode index tuples.
 
+  注意：一个表（例如，在磁盘上的表）有一个单独的Rdb_key_def对象，该对象由多个TABLE*对象
+  共享并且可能同时被不同的线程使用
   Note: a table (as in, on-disk table) has a single Rdb_key_def object which
   is shared across multiple TABLE* objects and may be used simultaneously from
   different threads.
-
+  有几种编码：
   There are several data encodings:
 
   === SQL LAYER ===
@@ -238,6 +241,8 @@ enum {
   index_tuple here is the form of key that can be compared with memcmp(), aka
   "mem-comparable form".
 
+  unpack_info 是一个额外的数据，它允许保存 mem-comparable格式编码的源值。
+  它只有在索引支持index-only reads存在
   unpack_info is extra data that allows to restore the original value from its
   mem-comparable form. It is present only if the index supports index-only
   reads.
@@ -940,6 +945,9 @@ class Rdb_field_packing {
   // spaces in the upack_info
   bool m_unpack_info_uses_two_bytes;
 
+  /* True 意味着一个index-only read 是有可能在该字段上的
+     False 对应 index-only read 可能存在，它依赖记录跟字段类型 
+  */
   /*
     True implies that an index-only read is always possible for this field.
     False means an index-only read may be possible depending on the record and

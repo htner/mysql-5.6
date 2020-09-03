@@ -64,9 +64,12 @@
 
   KeyTupleFormat
   ~~~~~~~~~~~~~~
+  在这个文件（以及其他位置）（KeyTupleFormat）这个编码生成操作在key-value元组上。
+  这些元组用以下的格式来保存：
   The code in this file (and elsewhere) makes operations on key value tuples.
   Those tuples are stored in the following format:
   
+  这个元组对应key部分值的序列。key部分值的长度依赖它的类型。
   The tuple is a sequence of key part values. The length of key part value
   depends only on its type (and not depends on the what value is stored)
   
